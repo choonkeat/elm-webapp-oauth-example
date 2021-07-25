@@ -13,6 +13,7 @@ const jsSha = hash.digest('hex')
 const { Elm } = require('./build/Server.js')
 var app = Elm.Server.init({
   flags: {
+    oauthProviders: JSON.parse(process.env.OAUTH_CONFIG),
     assetsHost: process.env.ASSETS_HOST || '',
     jsSha: jsSha
   }

@@ -1,5 +1,7 @@
 port module Server exposing (..)
 
+import Dict exposing (Dict)
+import Http
 import Json.Decode
 import Json.Encode
 import Platform exposing (Task)
@@ -8,8 +10,10 @@ import Protocol.Auto
 import Task
 import Time
 import Url
+import Url.Parser
 import Webapp.Server
 import Webapp.Server.HTTP exposing (Method(..), Request, Response, StatusCode(..))
+import Webapp.Server.OAuth
 
 
 
@@ -62,6 +66,7 @@ main =
 type alias Flags =
     { jsSha : Maybe String
     , assetsHost : Maybe String
+    , oauthProviders : List ( String, Webapp.Server.OAuth.Config )
     }
 
 
@@ -69,6 +74,7 @@ type alias ServerState =
     { greeting : String
     , jsSha : String
     , assetsHost : String
+    , oauthProviders : Dict String Webapp.Server.OAuth.Config
     }
 
 
@@ -87,6 +93,7 @@ init flags =
             { greeting = "Hello world"
             , jsSha = Maybe.withDefault "" flags.jsSha
             , assetsHost = Maybe.withDefault "" flags.assetsHost
+            , oauthProviders = Dict.fromList flags.oauthProviders
             }
 
         cmd =
@@ -116,21 +123,45 @@ subscriptions serverState =
 
 type Route
     = Homepage
+    | Login String (Result String (Maybe String))
 
 
 routeDecoder : Url.Url -> Maybe Route
 routeDecoder urlUrl =
-    case urlUrl.path of
-        "/" ->
-            Just Homepage
-
-        _ ->
-            Nothing
+    let
+        router =
+            Url.Parser.oneOf
+                [ Url.Parser.map Homepage Url.Parser.top
+                , Webapp.Server.OAuth.router (Url.Parser.s "oauth") Login
+                ]
+    in
+    Url.Parser.parse router urlUrl
 
 
 updateFromRoute : ( Method, Protocol.RequestContext, Maybe Route ) -> Time.Posix -> Request -> ServerState -> ( ServerState, Cmd Msg )
 updateFromRoute ( method, ctx, route ) now request serverState =
     case ( method, ctx, route ) of
+        ( GET, _, Just (Login providerName codeResult) ) ->
+            case Dict.get providerName serverState.oauthProviders of
+                Nothing ->
+                    ( serverState
+                    , writeResponse request { statusCode = StatusNotFound, body = "Not found?", headers = [] }
+                    )
+
+                Just oauthConfig ->
+                    ( serverState
+                    , Webapp.Server.OAuth.updateFromRoute
+                        { state = "state"
+                        , now = now
+                        , onSuccess = loginSuccess
+                        , onFail = loginFail
+                        , redirectUrl = "http://localhost:8000/oauth/" ++ providerName -- should match `Login` route
+                        }
+                        oauthConfig
+                        codeResult
+                        |> Task.attempt (OnHttpResponse request)
+                    )
+
         ( GET, _, _ ) ->
             ( serverState
             , writeResponse request
@@ -151,6 +182,27 @@ updateFromRoute ( method, ctx, route ) now request serverState =
             ( serverState
             , writeResponse request { statusCode = StatusNotFound, body = "Not found?", headers = [] }
             )
+
+
+{-| Store resp, set cookies, etc
+-}
+loginSuccess : Webapp.Server.OAuth.AccessTokenResponse -> Task Response Response
+loginSuccess resp =
+    Task.succeed
+        { statusCode = StatusOK
+        , headers = []
+        , body = Debug.toString resp
+        }
+
+
+{-| Let user know login failed
+-}
+loginFail : Http.Error -> Response
+loginFail err =
+    { statusCode = StatusOK
+    , headers = []
+    , body = Debug.toString err
+    }
 
 
 
